@@ -1,0 +1,7 @@
+crosshair
+*.o
+*.d
+dist/
+nvim.log
+*.log
+.cache/

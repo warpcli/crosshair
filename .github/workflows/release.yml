@@ -1,0 +1,63 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build-linux-x86_64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libgtk-3-dev \
+            libgtk-layer-shell-dev \
+            libcairo2-dev
+
+      - name: Build
+        run: make
+
+      - name: Package
+        run: |
+          mkdir -p dist/wayland-crosshair-linux-x86_64
+          cp crosshair README.md dist/wayland-crosshair-linux-x86_64/
+          tar -C dist -czf dist/wayland-crosshair-linux-x86_64.tar.gz wayland-crosshair-linux-x86_64
+          sha256sum dist/wayland-crosshair-linux-x86_64.tar.gz > dist/checksums.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wayland-crosshair-linux-x86_64
+          path: |
+            dist/wayland-crosshair-linux-x86_64.tar.gz
+            dist/checksums.txt
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG_NAME" \
+            dist/wayland-crosshair-linux-x86_64.tar.gz \
+            dist/checksums.txt \
+            --title "$TAG_NAME" \
+            --generate-notes
