@@ -15,8 +15,17 @@ permissions:
 
 jobs:
   build:
-    name: build-linux-x86_64
-    runs-on: ubuntu-24.04
+    name: build-linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
 
     steps:
       - name: Checkout
@@ -37,27 +46,45 @@ jobs:
 
       - name: Package
         run: |
-          mkdir -p dist/wayland-crosshair-linux-x86_64
-          cp crosshair README.md dist/wayland-crosshair-linux-x86_64/
-          tar -C dist -czf dist/wayland-crosshair-linux-x86_64.tar.gz wayland-crosshair-linux-x86_64
-          sha256sum dist/wayland-crosshair-linux-x86_64.tar.gz > dist/checksums.txt
+          package="wayland-crosshair-linux-${{ matrix.arch }}"
+          mkdir -p "dist/$package"
+          cp crosshair README.md "dist/$package/"
+          tar -C dist -czf "dist/$package.tar.gz" "$package"
+          sha256sum "dist/$package.tar.gz" > "dist/$package.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wayland-crosshair-linux-x86_64
+          name: wayland-crosshair-linux-${{ matrix.arch }}
           path: |
-            dist/wayland-crosshair-linux-x86_64.tar.gz
-            dist/checksums.txt
+            dist/wayland-crosshair-linux-${{ matrix.arch }}.tar.gz
+            dist/wayland-crosshair-linux-${{ matrix.arch }}.sha256
+
+  release:
+    name: release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Build combined checksums
+        run: |
+          cat dist/*.sha256 > dist/checksums.txt
 
       - name: Create GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
           gh release create "$TAG_NAME" \
             dist/wayland-crosshair-linux-x86_64.tar.gz \
+            dist/wayland-crosshair-linux-aarch64.tar.gz \
             dist/checksums.txt \
             --title "$TAG_NAME" \
             --generate-notes

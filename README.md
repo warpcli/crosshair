@@ -117,6 +117,7 @@ git push origin v0.1.0
 The release contains:
 
 - `wayland-crosshair-linux-x86_64.tar.gz`
+- `wayland-crosshair-linux-aarch64.tar.gz`
 - `checksums.txt`
 
 The published binary is dynamically linked. Target machines still need the
