@@ -8,8 +8,16 @@
 #include <unistd.h>
 
 #define UPDATE_MS 8
-#define LINE_WIDTH 2.0
-#define DAMAGE_PAD 10
+#define ANIMATION_MS 16
+#define LINE_WIDTH 1.8
+#define DAMAGE_PAD 8
+#define CENTER_GAP 24.0
+#define CENTER_DAMAGE 42
+#define DOT_RADIUS 3.0
+#define RING_RADIUS 17.0
+#define TICK_INNER_RADIUS 23.0
+#define TICK_OUTER_RADIUS 30.0
+#define PI 3.14159265358979323846
 
 typedef struct {
     GtkWidget *area;
@@ -27,6 +35,7 @@ static double line_r = 1.0;
 static double line_g = 1.0;
 static double line_b = 1.0;
 static gboolean line_color_loaded = FALSE;
+static gboolean cursor_hidden = FALSE;
 static guint color_reload_source = 0;
 static GFileMonitor *colors_json_monitor = NULL;
 static GFileMonitor *colors_monitor = NULL;
@@ -43,6 +52,33 @@ static void spawn_wlsunset(const char *gamma) {
         _exit(1);
     }
     atexit(kill_wlsunset);
+}
+
+static void restore_hyprland_cursor(void) {
+    if (!cursor_hidden)
+        return;
+
+    system("hyprctl keyword cursor:invisible false >/dev/null 2>&1");
+    cursor_hidden = FALSE;
+}
+
+static void hide_hyprland_cursor(void) {
+    const char *setting = getenv("CROSSHAIR_HIDE_CURSOR");
+    if (setting && (strcmp(setting, "0") == 0 || strcmp(setting, "false") == 0 || strcmp(setting, "no") == 0))
+        return;
+
+    if (system("hyprctl keyword cursor:invisible true >/dev/null 2>&1") == 0
+        && system("hyprctl getoption cursor:invisible 2>/dev/null | grep -q 'bool: true'") == 0) {
+        cursor_hidden = TRUE;
+        atexit(restore_hyprland_cursor);
+    }
+}
+
+static void handle_signal(int sig) {
+    restore_hyprland_cursor();
+    kill_wlsunset();
+    signal(sig, SIG_DFL);
+    raise(sig);
 }
 
 static gboolean parse_hex_color(const char *text, double *r, double *g, double *b) {
@@ -234,6 +270,9 @@ static void queue_crosshair_damage(CrosshairSurface *surface, double local_x, do
     gtk_widget_queue_draw_area(surface->area,
                                0, y - pad,
                                surface->geometry.width, pad * 2 + 1);
+    gtk_widget_queue_draw_area(surface->area,
+                               x - CENTER_DAMAGE, y - CENTER_DAMAGE,
+                               CENTER_DAMAGE * 2 + 1, CENTER_DAMAGE * 2 + 1);
 }
 
 static void update_surface_cursor_state(CrosshairSurface *surface) {
@@ -248,6 +287,11 @@ static void update_surface_cursor_state(CrosshairSurface *surface) {
     surface->local_x = local_x;
     surface->local_y = local_y;
     surface->inside = inside;
+
+    if (old_inside != inside) {
+        gtk_widget_queue_draw(surface->area);
+        return;
+    }
 
     if (old_inside) {
         surface->inside = TRUE;
@@ -296,6 +340,27 @@ static gboolean update_cursor(gpointer _) {
     return G_SOURCE_CONTINUE;
 }
 
+static gboolean update_animation(gpointer _) {
+    (void)_;
+
+    if (!surfaces)
+        return G_SOURCE_CONTINUE;
+
+    for (guint i = 0; i < surfaces->len; i++) {
+        CrosshairSurface *surface = g_ptr_array_index(surfaces, i);
+        if (!surface->inside)
+            continue;
+
+        int x = (int)round(surface->local_x);
+        int y = (int)round(surface->local_y);
+        gtk_widget_queue_draw_area(surface->area,
+                                   x - CENTER_DAMAGE, y - CENTER_DAMAGE,
+                                   CENTER_DAMAGE * 2 + 1, CENTER_DAMAGE * 2 + 1);
+    }
+
+    return G_SOURCE_CONTINUE;
+}
+
 static gboolean on_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
     (void)w;
     CrosshairSurface *surface = data;
@@ -311,19 +376,66 @@ static gboolean on_draw(GtkWidget *w, cairo_t *cr, gpointer data) {
         return FALSE;
 
     cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
-    cairo_set_source_rgba(cr, line_r, line_g, line_b, 0.62);
+
+    cairo_set_source_rgba(cr, line_r, line_g, line_b, 0.42);
     cairo_set_line_width(cr, LINE_WIDTH);
-    const double dash[] = {6.0, 7.0};
+    const double dash[] = {4.0, 8.0};
     cairo_set_dash(cr, dash, 2, 0);
 
     double x = round(surface->local_x);
     double y = round(surface->local_y);
+    double gap = CENTER_GAP;
 
     cairo_move_to(cr, x, 0);
+    cairo_line_to(cr, x, MAX(0.0, y - gap));
+    cairo_move_to(cr, x, MIN((double)a.height, y + gap));
     cairo_line_to(cr, x, a.height);
     cairo_move_to(cr, 0, y);
+    cairo_line_to(cr, MAX(0.0, x - gap), y);
+    cairo_move_to(cr, MIN((double)a.width, x + gap), y);
     cairo_line_to(cr, a.width, y);
     cairo_stroke(cr);
+
+    gint64 now = g_get_monotonic_time();
+    double t = now / 1000000.0;
+    double rotation = fmod(t * PI * 0.72, PI * 2.0);
+
+    cairo_save(cr);
+    cairo_translate(cr, x, y);
+    cairo_set_dash(cr, NULL, 0, 0);
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+
+    cairo_set_line_width(cr, LINE_WIDTH);
+    cairo_set_source_rgba(cr, line_r, line_g, line_b, 0.76);
+    for (int i = 0; i < 3; i++) {
+        double start = rotation + i * (PI * 2.0 / 3.0);
+        cairo_arc(cr, 0, 0, RING_RADIUS, start, start + PI * 0.34);
+        cairo_stroke(cr);
+    }
+
+    cairo_set_line_width(cr, LINE_WIDTH);
+    cairo_set_source_rgba(cr, line_r, line_g, line_b, 0.48);
+    for (int i = 0; i < 4; i++) {
+        double angle = rotation * -0.72 + i * (PI / 2.0);
+        double sx = cos(angle) * TICK_INNER_RADIUS;
+        double sy = sin(angle) * TICK_INNER_RADIUS;
+        double ex = cos(angle) * TICK_OUTER_RADIUS;
+        double ey = sin(angle) * TICK_OUTER_RADIUS;
+        cairo_move_to(cr, sx, sy);
+        cairo_line_to(cr, ex, ey);
+        cairo_stroke(cr);
+    }
+
+    cairo_set_line_width(cr, LINE_WIDTH);
+    cairo_set_source_rgba(cr, line_r, line_g, line_b, 0.28);
+    cairo_arc(cr, 0, 0, RING_RADIUS + 5.0, 0, PI * 2.0);
+    cairo_stroke(cr);
+
+    cairo_set_source_rgba(cr, line_r, line_g, line_b, 0.95);
+    cairo_arc(cr, 0, 0, DOT_RADIUS, 0, PI * 2.0);
+    cairo_fill(cr);
+
+    cairo_restore(cr);
 
     return FALSE;
 }
@@ -380,11 +492,15 @@ static void activate(GtkApplication *app, gpointer _) {
 
     update_cursor(NULL);
     g_timeout_add(UPDATE_MS, update_cursor, NULL);
+    g_timeout_add(ANIMATION_MS, update_animation, NULL);
     watch_accent_files();
 }
 
 int main(int argc, char **argv) {
     load_accent_color();
+    signal(SIGINT, handle_signal);
+    signal(SIGTERM, handle_signal);
+    hide_hyprland_cursor();
 
     if (argc >= 2)
         spawn_wlsunset(argv[1]);
