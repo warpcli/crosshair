@@ -1,6 +1,7 @@
 #include <src/Compositor.hpp>
 #include <src/event/EventBus.hpp>
 #include <src/managers/CursorManager.hpp>
+#include <src/managers/input/InputManager.hpp>
 #include <src/managers/PointerManager.hpp>
 #include <src/managers/eventLoop/EventLoopManager.hpp>
 #include <src/managers/eventLoop/EventLoopTimer.hpp>
@@ -28,18 +29,15 @@ static constexpr double LINE_WIDTH         = 3.0;
 static constexpr double CENTER_GAP         = 52.0;
 static constexpr double CENTER_DAMAGE      = 86.0;
 static constexpr double DOT_RADIUS         = 3.0;
-static constexpr double HUD_SCALE          = 1.56;
-static constexpr double RING_RADIUS        = 17.0;
-static constexpr double TICK_INNER_RADIUS  = 23.0;
-static constexpr double TICK_OUTER_RADIUS  = 30.0;
 static constexpr double BEAM_HALF_LENGTH   = 12.0;
 static constexpr double BEAM_CAP_LENGTH    = 4.0;
 static constexpr double LABEL_FONT_SIZE    = 11.0;
 static constexpr double LABEL_OFFSET       = 24.0;
 static constexpr double DRAG_LABEL_OFFSET  = 70.0;
 static constexpr double DRAG_LABEL_THRESHOLD = 10.0;
-static constexpr double CTRL_PULSE_DURATION  = 0.65;
 static constexpr double KEY_PULSE_DURATION   = 0.28;
+static constexpr double MODIFIER_PULSE_DURATION = 0.65;
+static constexpr double CTRL_TRIPLE_TAP_WINDOW = 1.0;
 
 enum CursorIntent {
     INTENT_DEFAULT,
@@ -70,10 +68,14 @@ static bool                g_have_last_position        = false;
 static Vector2D            g_drag_start                = {0, 0};
 static int                 g_pressed_buttons           = 0;
 static bool                g_drag_active               = false;
-static double              g_ctrl_pulse_started        = -10.0;
 static double              g_key_pulse_started         = -10.0;
+static double              g_modifier_pulse_started    = -10.0;
+static double              g_ctrl_tap_started          = -10.0;
+static int                 g_ctrl_tap_count            = 0;
+static uint32_t            g_last_modifier_mask        = 0;
 static bool                g_locked_software_cursor    = false;
 static bool                g_crosshair_visible         = true;
+static bool                g_minimal_mode              = false;
 static double              g_color_r                   = 1.0;
 static double              g_color_g                   = 1.0;
 static double              g_color_b                   = 1.0;
@@ -95,6 +97,8 @@ struct SInertia {
 using RendererSetCursorFromNameFn = void (*)(Render::IHyprRenderer*, const std::string&, bool);
 using CursorManagerSetCursorFromNameFn = void (*)(CCursorManager*, const std::string&);
 using RenderSoftwareCursorsForFn = void (*)(CPointerManager*, PHLMONITOR, const Time::steady_tp&, CRegion&, std::optional<Vector2D>, bool);
+
+static void damage_crosshair_at(const Vector2D& global);
 
 static std::string normalize_shape_name(std::string shape) {
     std::replace(shape.begin(), shape.end(), '-', '_');
@@ -392,7 +396,60 @@ static Vector2D opposite_badge_offset(const SInertia& inertia, double fallback_y
 }
 
 static bool is_ctrl_keycode(uint32_t keycode) {
-    return keycode == KEY_LEFTCTRL || keycode == KEY_RIGHTCTRL || keycode == KEY_LEFTCTRL + 8 || keycode == KEY_RIGHTCTRL + 8;
+    return keycode == KEY_LEFTCTRL || keycode == KEY_RIGHTCTRL;
+}
+
+static bool is_pulse_modifier_keycode(uint32_t keycode) {
+    return is_ctrl_keycode(keycode)
+        || keycode == KEY_LEFTALT || keycode == KEY_RIGHTALT
+        || keycode == KEY_LEFTMETA || keycode == KEY_RIGHTMETA;
+}
+
+static uint32_t pulse_modifier_mask(uint32_t modifiers) {
+    return modifiers & (HL_MODIFIER_CTRL | HL_MODIFIER_ALT | HL_MODIFIER_META);
+}
+
+static void trigger_key_pulse(bool outer_pulse) {
+    const double now = steady_seconds();
+    g_key_pulse_started = now;
+    if (outer_pulse)
+        g_modifier_pulse_started = now;
+
+    if (g_pPointerManager)
+        damage_crosshair_at(g_pPointerManager->position());
+}
+
+static void set_minimal_mode(bool minimal) {
+    if (g_minimal_mode == minimal)
+        return;
+
+    if (g_pPointerManager)
+        damage_crosshair_at(g_pPointerManager->position());
+
+    g_minimal_mode = minimal;
+
+    if (g_pPointerManager)
+        damage_crosshair_at(g_pPointerManager->position());
+}
+
+static void toggle_minimal_mode() {
+    set_minimal_mode(!g_minimal_mode);
+}
+
+static void register_ctrl_tap() {
+    const double now = steady_seconds();
+    if (now - g_ctrl_tap_started > CTRL_TRIPLE_TAP_WINDOW) {
+        g_ctrl_tap_started = now;
+        g_ctrl_tap_count   = 1;
+        return;
+    }
+
+    ++g_ctrl_tap_count;
+    if (g_ctrl_tap_count >= 3) {
+        g_ctrl_tap_started = -10.0;
+        g_ctrl_tap_count   = 0;
+        toggle_minimal_mode();
+    }
 }
 
 static void cairo_set_accent(cairo_t* cr, double alpha) {
@@ -614,10 +671,10 @@ static void cairo_draw_center_glyph(cairo_t* cr, double cx, double cy) {
         cairo_draw_resize_glyph(cr, cx, cy);
     } else if (g_cursor_intent == INTENT_MOVE || g_cursor_intent == INTENT_GRAB) {
         cairo_set_accent(cr, 0.62 + 0.28 * key_pulse);
-        cairo_draw_center_cross(cr, cx, cy, 9.0 + 4.0 * key_pulse);
+        cairo_draw_center_cross(cr, cx, cy, 16.0 + 3.0 * key_pulse);
     } else if (g_cursor_intent == INTENT_WAIT) {
         cairo_set_accent(cr, 0.78 + 0.18 * key_pulse);
-        cairo_draw_center_cross(cr, cx, cy, 7.0 + 4.0 * key_pulse);
+        cairo_draw_center_cross(cr, cx, cy, 14.0 + 3.0 * key_pulse);
         cairo_set_accent(cr, 0.68);
         cairo_move_to(cr, cx - px(7.0), cy);
         cairo_line_to(cr, cx + px(7.0), cy);
@@ -635,7 +692,7 @@ static void cairo_draw_center_glyph(cairo_t* cr, double cx, double cy) {
             return;
         }
         cairo_set_accent(cr, 0.95);
-        cairo_draw_center_cross(cr, cx, cy, 7.0 + 5.0 * key_pulse);
+        cairo_draw_center_cross(cr, cx, cy, 14.0 + 4.0 * key_pulse);
     }
 }
 
@@ -745,18 +802,17 @@ static void draw_crosshair_lines(PHLMONITOR monitor, const Vector2D& local, cons
     draw_projected_line_labels(monitor, local, damage);
 }
 
-static void cairo_draw_ctrl_pulse(cairo_t* cr, double center, double seconds) {
-    const double age = seconds - g_ctrl_pulse_started;
-    if (age < 0.0 || age > CTRL_PULSE_DURATION)
+static void cairo_draw_modifier_pulse(cairo_t* cr, double center) {
+    const double age = steady_seconds() - g_modifier_pulse_started;
+    if (age < 0.0 || age > MODIFIER_PULSE_DURATION)
         return;
 
-    const double t    = std::clamp(age / CTRL_PULSE_DURATION, 0.0, 1.0);
+    const double t    = std::clamp(age / MODIFIER_PULSE_DURATION, 0.0, 1.0);
     const double ease = 1.0 - std::pow(1.0 - t, 3.0);
     const double fade = 1.0 - t;
 
-    cairo_set_dash(cr, nullptr, 0, 0);
     cairo_set_line_width(cr, px(LINE_WIDTH));
-
+    cairo_set_dash(cr, nullptr, 0, 0);
     cairo_set_accent(cr, 0.62 * fade);
     cairo_arc(cr, center, center, px(34.0 + 42.0 * ease), 0, CROSSHAIR_PI * 2.0);
     cairo_stroke(cr);
@@ -772,43 +828,18 @@ static void draw_center_hud(PHLMONITOR monitor, const Vector2D& local, double x,
     cairo_t* cr = nullptr;
     cairo_surface_t* patch  = make_cairo_surface(patch_size, patch_size, &cr);
 
-    const double seconds     = std::chrono::duration<double>(now.time_since_epoch()).count();
-    const bool   special_intent  = g_cursor_intent != INTENT_DEFAULT;
-    const double rotation        = std::fmod(seconds * CROSSHAIR_PI * 0.72, CROSSHAIR_PI * 2.0);
-    const double inner_rotation  = special_intent ? 0.0 : rotation;
-    const double spike_rotation  = special_intent ? rotation * -0.72 : 0.0;
-    const double special_blink   = special_intent && g_cursor_intent != INTENT_POINTER ? (0.5 + 0.5 * std::sin(seconds * 7.0)) : 0.0;
-    const double ring_radius = px(RING_RADIUS * HUD_SCALE);
+    (void)now;
 
     cairo_set_line_width(cr, px(LINE_WIDTH));
     cairo_set_dash(cr, nullptr, 0, 0);
-    cairo_draw_ctrl_pulse(cr, center, seconds);
-
-    cairo_set_accent(cr, special_intent && g_cursor_intent != INTENT_POINTER ? 0.34 + 0.42 * special_blink : 0.76);
-    for (int i = 0; i < 3; ++i) {
-        const double start = inner_rotation + i * (CROSSHAIR_PI * 2.0 / 3.0);
-        cairo_arc(cr, center, center, ring_radius, start, start + CROSSHAIR_PI * 0.34);
-        cairo_stroke(cr);
-    }
-
-    cairo_set_accent(cr, 0.48);
-    for (int i = 0; i < 4; ++i) {
-        const double angle = spike_rotation + i * (CROSSHAIR_PI / 2.0);
-        cairo_move_to(cr, center + std::cos(angle) * px(TICK_INNER_RADIUS * HUD_SCALE), center + std::sin(angle) * px(TICK_INNER_RADIUS * HUD_SCALE));
-        cairo_line_to(cr, center + std::cos(angle) * px(TICK_OUTER_RADIUS * HUD_SCALE), center + std::sin(angle) * px(TICK_OUTER_RADIUS * HUD_SCALE));
-        cairo_stroke(cr);
-    }
-
-    cairo_set_accent(cr, 0.28);
-    cairo_arc(cr, center, center, ring_radius + px(5.0), 0, CROSSHAIR_PI * 2.0);
-    cairo_stroke(cr);
-
+    cairo_draw_modifier_pulse(cr, center);
     cairo_draw_center_glyph(cr, center, center);
     cairo_destroy(cr);
     queue_cairo_texture(patch, x - center, y - center, patch_size, patch_size, damage);
     cairo_surface_destroy(patch);
 
-    draw_direction_labels(monitor, local, x, y, damage);
+    if (!g_minimal_mode)
+        draw_direction_labels(monitor, local, x, y, damage);
     draw_drag_label(monitor->m_position + local, x, y, damage);
 }
 
@@ -830,7 +861,8 @@ static void draw_crosshair(PHLMONITOR monitor, const Time::steady_tp& now, CRegi
     if (!line_intersects)
         return;
 
-    draw_crosshair_lines(monitor, local, damage);
+    if (!g_minimal_mode)
+        draw_crosshair_lines(monitor, local, damage);
 
     if (!cursor_inside)
         return;
@@ -907,13 +939,12 @@ static void on_keyboard_key(const IKeyboard::SKeyEvent& event, Event::SCallbackI
     if (event.state != WL_KEYBOARD_KEY_STATE_PRESSED)
         return;
 
-    const double now = steady_seconds();
-    g_key_pulse_started = now;
     if (is_ctrl_keycode(event.keycode))
-        g_ctrl_pulse_started = now;
+        register_ctrl_tap();
+    else
+        g_ctrl_tap_count = 0;
 
-    if (g_pPointerManager)
-        damage_crosshair_at(g_pPointerManager->position());
+    trigger_key_pulse(is_pulse_modifier_keycode(event.keycode));
 }
 
 static void on_timer(SP<CEventLoopTimer> self, void*) {
@@ -926,6 +957,14 @@ static void on_timer(SP<CEventLoopTimer> self, void*) {
         g_color_reload_ticks = 0;
         if (load_accent_color() && g_have_last_position)
             damage_crosshair_at(g_last_position);
+    }
+
+    if (g_pInputManager) {
+        const uint32_t modifier_mask = pulse_modifier_mask(g_pInputManager->getModsFromAllKBs());
+        const uint32_t newly_pressed = modifier_mask & ~g_last_modifier_mask;
+        if (newly_pressed)
+            trigger_key_pulse(true);
+        g_last_modifier_mask = modifier_mask;
     }
 
     const Vector2D position = g_pPointerManager->position();
@@ -1014,11 +1053,17 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
             if (g_crosshair_visible)
                 damage_crosshair_at(g_last_position);
         }
+    } else if (action == "minimal" || action == "simple") {
+        set_minimal_mode(true);
+    } else if (action == "full" || action == "normal") {
+        set_minimal_mode(false);
+    } else if (action == "toggle-minimal" || action == "minimal-toggle") {
+        toggle_minimal_mode();
     }
 
     const bool ready = g_software_cursor_hook && g_locked_software_cursor;
-    const bool ctrl_pulse_active = steady_seconds() - g_ctrl_pulse_started <= CTRL_PULSE_DURATION;
     const bool key_pulse_active = steady_seconds() - g_key_pulse_started <= KEY_PULSE_DURATION;
+    const bool modifier_pulse_active = steady_seconds() - g_modifier_pulse_started <= MODIFIER_PULSE_DURATION;
     const std::string color = current_color_hex();
     const std::string background = current_bg_hex();
     if (format == FORMAT_JSON) {
@@ -1028,6 +1073,7 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
                "\"intent\":\"" + intent_name(g_cursor_intent) + "\","
                "\"shape\":\"" + g_last_shape + "\","
                "\"visible\":" + (g_crosshair_visible ? "true" : "false") + ","
+               "\"minimal_mode\":" + (g_minimal_mode ? "true" : "false") + ","
                "\"color\":\"" + color + "\","
                "\"background\":\"" + background + "\","
                "\"software_cursor_hook\":" + (g_software_cursor_hook ? "true" : "false") + ","
@@ -1035,8 +1081,8 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
                "\"cursor_manager_hook\":" + (g_cursor_manager_name_hook ? "true" : "false") + ","
                "\"software_cursor_locked\":" + (g_locked_software_cursor ? "true" : "false") + ","
                "\"drag_active\":" + (g_drag_active ? "true" : "false") + ","
-               "\"ctrl_pulse_active\":" + (ctrl_pulse_active ? "true" : "false") + ","
                "\"key_pulse_active\":" + (key_pulse_active ? "true" : "false") + ","
+               "\"modifier_pulse_active\":" + (modifier_pulse_active ? "true" : "false") + ","
                "\"render_calls\":" + std::to_string(g_render_calls) + ","
                "\"draw_calls\":" + std::to_string(g_draw_calls) +
                "}";
@@ -1047,6 +1093,7 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
            "intent: " + intent_name(g_cursor_intent) + "\n"
            "shape: " + g_last_shape + "\n"
            "visible: " + (g_crosshair_visible ? "yes" : "no") + "\n"
+           "minimal_mode: " + (g_minimal_mode ? "yes" : "no") + "\n"
            "color: " + color + "\n"
            "background: " + background + "\n"
            "software_cursor_hook: " + (g_software_cursor_hook ? "yes" : "no") + "\n"
@@ -1054,8 +1101,8 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
            "cursor_manager_hook: " + (g_cursor_manager_name_hook ? "yes" : "no") + "\n"
            "software_cursor_locked: " + (g_locked_software_cursor ? "yes" : "no") + "\n"
            "drag_active: " + (g_drag_active ? "yes" : "no") + "\n"
-           "ctrl_pulse_active: " + (ctrl_pulse_active ? "yes" : "no") + "\n"
            "key_pulse_active: " + (key_pulse_active ? "yes" : "no") + "\n"
+           "modifier_pulse_active: " + (modifier_pulse_active ? "yes" : "no") + "\n"
            "render_calls: " + std::to_string(g_render_calls) + "\n"
            "draw_calls: " + std::to_string(g_draw_calls) + "\n";
 }
@@ -1075,6 +1122,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
     }
 
     load_accent_color();
+    g_last_modifier_mask = g_pInputManager ? pulse_modifier_mask(g_pInputManager->getModsFromAllKBs()) : 0;
 
     if (PROTO::cursorShape) {
         g_shape_listener = PROTO::cursorShape->m_events.setShape.listen([](const CCursorShapeProtocol::SSetShapeEvent& event) {
