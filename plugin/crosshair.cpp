@@ -20,6 +20,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <linux/input-event-codes.h>
 
 static constexpr double CROSSHAIR_PI       = 3.14159265358979323846;
 static constexpr double UPDATE_MS          = 16.0;
@@ -36,6 +37,9 @@ static constexpr double BEAM_CAP_LENGTH    = 4.0;
 static constexpr double LABEL_FONT_SIZE    = 11.0;
 static constexpr double LABEL_OFFSET       = 24.0;
 static constexpr double DRAG_LABEL_OFFSET  = 70.0;
+static constexpr double DRAG_LABEL_THRESHOLD = 10.0;
+static constexpr double CTRL_PULSE_DURATION  = 0.65;
+static constexpr double KEY_PULSE_DURATION   = 0.28;
 
 enum CursorIntent {
     INTENT_DEFAULT,
@@ -53,6 +57,7 @@ static HANDLE              g_handle                   = nullptr;
 static CHyprSignalListener g_shape_listener;
 static CHyprSignalListener g_cursor_changed_listener;
 static CHyprSignalListener g_mouse_button_listener;
+static CHyprSignalListener g_keyboard_key_listener;
 static CFunctionHook*      g_renderer_name_hook       = nullptr;
 static CFunctionHook*      g_cursor_manager_name_hook = nullptr;
 static CFunctionHook*      g_software_cursor_hook     = nullptr;
@@ -65,7 +70,10 @@ static bool                g_have_last_position        = false;
 static Vector2D            g_drag_start                = {0, 0};
 static int                 g_pressed_buttons           = 0;
 static bool                g_drag_active               = false;
+static double              g_ctrl_pulse_started        = -10.0;
+static double              g_key_pulse_started         = -10.0;
 static bool                g_locked_software_cursor    = false;
+static bool                g_crosshair_visible         = true;
 static double              g_color_r                   = 1.0;
 static double              g_color_g                   = 1.0;
 static double              g_color_b                   = 1.0;
@@ -252,6 +260,26 @@ static bool read_json_color_key(const std::string& path, const std::string& key,
     return false;
 }
 
+static std::string trim_copy(std::string text) {
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+        return "";
+
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+static std::string command_action(std::string request) {
+    request = trim_copy(std::move(request));
+    if (request.starts_with("crosshair"))
+        request = trim_copy(request.substr(std::strlen("crosshair")));
+    if (request.starts_with("-j"))
+        request = trim_copy(request.substr(2));
+
+    const auto space = request.find_first_of(" \t\r\n");
+    return space == std::string::npos ? request : request.substr(0, space);
+}
+
 static bool read_colors_line(const std::string& path, int target_line, double& r, double& g, double& b) {
     std::ifstream file(path);
     if (!file.good())
@@ -313,6 +341,19 @@ static double px(double value) {
     return value * g_render_scale;
 }
 
+static double steady_seconds() {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static double active_pulse(double started, double duration) {
+    const double age = steady_seconds() - started;
+    if (age < 0.0 || age > duration)
+        return 0.0;
+
+    const double t = std::clamp(age / duration, 0.0, 1.0);
+    return std::sin(t * CROSSHAIR_PI);
+}
+
 static double vector_length(const Vector2D& vector) {
     return std::sqrt(vector.x * vector.x + vector.y * vector.y);
 }
@@ -338,11 +379,20 @@ static SInertia drag_inertia_for(const Vector2D& current) {
     return inertia.active ? inertia : pointer_inertia_for(current);
 }
 
+static bool drag_label_visible_for(const Vector2D& current) {
+    const Vector2D delta = current - g_drag_start;
+    return std::abs(delta.x) >= DRAG_LABEL_THRESHOLD || std::abs(delta.y) >= DRAG_LABEL_THRESHOLD;
+}
+
 static Vector2D opposite_badge_offset(const SInertia& inertia, double fallback_y = 24.0) {
     if (!inertia.active)
         return {px(DRAG_LABEL_OFFSET), px(fallback_y)};
 
     return {-inertia.direction.x * px(DRAG_LABEL_OFFSET), -inertia.direction.y * px(DRAG_LABEL_OFFSET)};
+}
+
+static bool is_ctrl_keycode(uint32_t keycode) {
+    return keycode == KEY_LEFTCTRL || keycode == KEY_RIGHTCTRL || keycode == KEY_LEFTCTRL + 8 || keycode == KEY_RIGHTCTRL + 8;
 }
 
 static void cairo_set_accent(cairo_t* cr, double alpha) {
@@ -530,6 +580,8 @@ static void queue_badge_label(const std::string& text, double anchor_x, double a
 }
 
 static void cairo_draw_center_glyph(cairo_t* cr, double cx, double cy) {
+    const double key_pulse = active_pulse(g_key_pulse_started, KEY_PULSE_DURATION);
+
     cairo_set_line_width(cr, px(LINE_WIDTH));
     cairo_set_accent(cr, 1.0);
 
@@ -561,11 +613,11 @@ static void cairo_draw_center_glyph(cairo_t* cr, double cx, double cy) {
         cairo_set_accent(cr, 0.78);
         cairo_draw_resize_glyph(cr, cx, cy);
     } else if (g_cursor_intent == INTENT_MOVE || g_cursor_intent == INTENT_GRAB) {
-        cairo_set_accent(cr, 0.62);
-        cairo_draw_center_cross(cr, cx, cy, 9.0);
+        cairo_set_accent(cr, 0.62 + 0.28 * key_pulse);
+        cairo_draw_center_cross(cr, cx, cy, 9.0 + 4.0 * key_pulse);
     } else if (g_cursor_intent == INTENT_WAIT) {
-        cairo_set_accent(cr, 0.78);
-        cairo_draw_center_cross(cr, cx, cy, 7.0);
+        cairo_set_accent(cr, 0.78 + 0.18 * key_pulse);
+        cairo_draw_center_cross(cr, cx, cy, 7.0 + 4.0 * key_pulse);
         cairo_set_accent(cr, 0.68);
         cairo_move_to(cr, cx - px(7.0), cy);
         cairo_line_to(cr, cx + px(7.0), cy);
@@ -583,7 +635,7 @@ static void cairo_draw_center_glyph(cairo_t* cr, double cx, double cy) {
             return;
         }
         cairo_set_accent(cr, 0.95);
-        cairo_draw_center_cross(cr, cx, cy, 7.0);
+        cairo_draw_center_cross(cr, cx, cy, 7.0 + 5.0 * key_pulse);
     }
 }
 
@@ -606,7 +658,7 @@ static void draw_direction_labels(PHLMONITOR monitor, const Vector2D& local, dou
 }
 
 static void draw_drag_label(const Vector2D& global, double x, double y, const CRegion& damage) {
-    if (!g_drag_active)
+    if (!g_drag_active || !drag_label_visible_for(global))
         return;
 
     const SInertia inertia = drag_inertia_for(global);
@@ -693,6 +745,27 @@ static void draw_crosshair_lines(PHLMONITOR monitor, const Vector2D& local, cons
     draw_projected_line_labels(monitor, local, damage);
 }
 
+static void cairo_draw_ctrl_pulse(cairo_t* cr, double center, double seconds) {
+    const double age = seconds - g_ctrl_pulse_started;
+    if (age < 0.0 || age > CTRL_PULSE_DURATION)
+        return;
+
+    const double t    = std::clamp(age / CTRL_PULSE_DURATION, 0.0, 1.0);
+    const double ease = 1.0 - std::pow(1.0 - t, 3.0);
+    const double fade = 1.0 - t;
+
+    cairo_set_dash(cr, nullptr, 0, 0);
+    cairo_set_line_width(cr, px(LINE_WIDTH));
+
+    cairo_set_accent(cr, 0.62 * fade);
+    cairo_arc(cr, center, center, px(34.0 + 42.0 * ease), 0, CROSSHAIR_PI * 2.0);
+    cairo_stroke(cr);
+
+    cairo_set_accent(cr, 0.34 * fade);
+    cairo_arc(cr, center, center, px(22.0 + 32.0 * ease), 0, CROSSHAIR_PI * 2.0);
+    cairo_stroke(cr);
+}
+
 static void draw_center_hud(PHLMONITOR monitor, const Vector2D& local, double x, double y, const Time::steady_tp& now, const CRegion& damage) {
     const int    patch_size = static_cast<int>(std::ceil(px(CENTER_DAMAGE * 2.0)));
     const double center     = patch_size / 2.0;
@@ -709,6 +782,8 @@ static void draw_center_hud(PHLMONITOR monitor, const Vector2D& local, double x,
 
     cairo_set_line_width(cr, px(LINE_WIDTH));
     cairo_set_dash(cr, nullptr, 0, 0);
+    cairo_draw_ctrl_pulse(cr, center, seconds);
+
     cairo_set_accent(cr, special_intent && g_cursor_intent != INTENT_POINTER ? 0.34 + 0.42 * special_blink : 0.76);
     for (int i = 0; i < 3; ++i) {
         const double start = inner_rotation + i * (CROSSHAIR_PI * 2.0 / 3.0);
@@ -742,6 +817,9 @@ static void draw_crosshair(PHLMONITOR monitor, const Time::steady_tp& now, CRegi
         return;
 
     ++g_draw_calls;
+
+    if (!g_crosshair_visible)
+        return;
 
     g_render_scale = std::max(1.0, static_cast<double>(monitor->m_scale));
 
@@ -825,6 +903,19 @@ static void on_mouse_button(const IPointer::SButtonEvent& event, Event::SCallbac
     damage_crosshair_at(position);
 }
 
+static void on_keyboard_key(const IKeyboard::SKeyEvent& event, Event::SCallbackInfo&) {
+    if (event.state != WL_KEYBOARD_KEY_STATE_PRESSED)
+        return;
+
+    const double now = steady_seconds();
+    g_key_pulse_started = now;
+    if (is_ctrl_keycode(event.keycode))
+        g_ctrl_pulse_started = now;
+
+    if (g_pPointerManager)
+        damage_crosshair_at(g_pPointerManager->position());
+}
+
 static void on_timer(SP<CEventLoopTimer> self, void*) {
     if (!g_pPointerManager) {
         self->updateTimeout(std::chrono::milliseconds(static_cast<int>(UPDATE_MS)));
@@ -838,7 +929,10 @@ static void on_timer(SP<CEventLoopTimer> self, void*) {
     }
 
     const Vector2D position = g_pPointerManager->position();
-    if (!g_have_last_position) {
+    if (!g_crosshair_visible) {
+        g_last_position      = position;
+        g_have_last_position = true;
+    } else if (!g_have_last_position) {
         g_last_position      = position;
         g_have_last_position = true;
         damage_crosshair_at(position);
@@ -893,9 +987,38 @@ static CFunctionHook* hook_demangled_match(const std::string& query, const std::
 }
 
 static std::string status_command(eHyprCtlOutputFormat format, std::string request) {
-    (void)request;
+    const std::string action = command_action(std::move(request));
+
+    if (action == "hide" || action == "off" || action == "disable") {
+        if (g_crosshair_visible && g_have_last_position)
+            damage_crosshair_at(g_last_position);
+        g_crosshair_visible = false;
+        if (g_pPointerManager) {
+            g_last_position      = g_pPointerManager->position();
+            g_have_last_position = true;
+        }
+    } else if (action == "show" || action == "on" || action == "enable") {
+        g_crosshair_visible = true;
+        if (g_pPointerManager) {
+            g_last_position      = g_pPointerManager->position();
+            g_have_last_position = true;
+            damage_crosshair_at(g_last_position);
+        }
+    } else if (action == "toggle") {
+        if (g_crosshair_visible && g_have_last_position)
+            damage_crosshair_at(g_last_position);
+        g_crosshair_visible = !g_crosshair_visible;
+        if (g_pPointerManager) {
+            g_last_position      = g_pPointerManager->position();
+            g_have_last_position = true;
+            if (g_crosshair_visible)
+                damage_crosshair_at(g_last_position);
+        }
+    }
 
     const bool ready = g_software_cursor_hook && g_locked_software_cursor;
+    const bool ctrl_pulse_active = steady_seconds() - g_ctrl_pulse_started <= CTRL_PULSE_DURATION;
+    const bool key_pulse_active = steady_seconds() - g_key_pulse_started <= KEY_PULSE_DURATION;
     const std::string color = current_color_hex();
     const std::string background = current_bg_hex();
     if (format == FORMAT_JSON) {
@@ -904,6 +1027,7 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
                "\"ready\":" + std::string(ready ? "true" : "false") + ","
                "\"intent\":\"" + intent_name(g_cursor_intent) + "\","
                "\"shape\":\"" + g_last_shape + "\","
+               "\"visible\":" + (g_crosshair_visible ? "true" : "false") + ","
                "\"color\":\"" + color + "\","
                "\"background\":\"" + background + "\","
                "\"software_cursor_hook\":" + (g_software_cursor_hook ? "true" : "false") + ","
@@ -911,6 +1035,8 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
                "\"cursor_manager_hook\":" + (g_cursor_manager_name_hook ? "true" : "false") + ","
                "\"software_cursor_locked\":" + (g_locked_software_cursor ? "true" : "false") + ","
                "\"drag_active\":" + (g_drag_active ? "true" : "false") + ","
+               "\"ctrl_pulse_active\":" + (ctrl_pulse_active ? "true" : "false") + ","
+               "\"key_pulse_active\":" + (key_pulse_active ? "true" : "false") + ","
                "\"render_calls\":" + std::to_string(g_render_calls) + ","
                "\"draw_calls\":" + std::to_string(g_draw_calls) +
                "}";
@@ -920,6 +1046,7 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
            "ready: " + std::string(ready ? "yes" : "no") + "\n"
            "intent: " + intent_name(g_cursor_intent) + "\n"
            "shape: " + g_last_shape + "\n"
+           "visible: " + (g_crosshair_visible ? "yes" : "no") + "\n"
            "color: " + color + "\n"
            "background: " + background + "\n"
            "software_cursor_hook: " + (g_software_cursor_hook ? "yes" : "no") + "\n"
@@ -927,6 +1054,8 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
            "cursor_manager_hook: " + (g_cursor_manager_name_hook ? "yes" : "no") + "\n"
            "software_cursor_locked: " + (g_locked_software_cursor ? "yes" : "no") + "\n"
            "drag_active: " + (g_drag_active ? "yes" : "no") + "\n"
+           "ctrl_pulse_active: " + (ctrl_pulse_active ? "yes" : "no") + "\n"
+           "key_pulse_active: " + (key_pulse_active ? "yes" : "no") + "\n"
            "render_calls: " + std::to_string(g_render_calls) + "\n"
            "draw_calls: " + std::to_string(g_draw_calls) + "\n";
 }
@@ -953,8 +1082,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
         });
     }
 
-    if (Event::bus())
+    if (Event::bus()) {
         g_mouse_button_listener = Event::bus()->m_events.input.mouse.button.listen(on_mouse_button);
+        g_keyboard_key_listener = Event::bus()->m_events.input.keyboard.key.listen(on_keyboard_key);
+    }
 
     if (g_pPointerManager) {
         g_cursor_changed_listener = g_pPointerManager->m_events.cursorChanged.listen([]() { set_renderer_shape(); });
@@ -979,7 +1110,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
         g_pEventLoopManager->addTimer(g_timer);
     }
 
-    g_status_command = HyprlandAPI::registerHyprCtlCommand(g_handle, SHyprCtlCommand{"crosshair", true, status_command});
+    g_status_command = HyprlandAPI::registerHyprCtlCommand(g_handle, SHyprCtlCommand{"crosshair", false, status_command});
     set_renderer_shape();
 
     return {
@@ -1005,6 +1136,7 @@ APICALL EXPORT void pluginExit() {
     g_shape_listener.reset();
     g_cursor_changed_listener.reset();
     g_mouse_button_listener.reset();
+    g_keyboard_key_listener.reset();
 
     if (g_locked_software_cursor && g_pPointerManager) {
         g_pPointerManager->unlockSoftwareAll();
