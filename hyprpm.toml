@@ -1,0 +1,11 @@
+[repository]
+name = "crosshair"
+authors = ["bresilla"]
+
+[crosshair]
+description = "Cursor-replacing CAD-style crosshair drawn directly by Hyprland."
+authors = ["bresilla"]
+output = "crosshair.so"
+build = [
+    "make plugin",
+]

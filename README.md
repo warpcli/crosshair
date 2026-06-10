@@ -1,130 +1,102 @@
-# wayland-crosshair
+# crosshair
 
-A lightweight Wayland overlay that draws a CAD-style crosshair at the current
-cursor position.
+Hyprland plugin that replaces the normal cursor with a CAD-style crosshair.
 
-It creates transparent, click-through `wlr-layer-shell` overlay surfaces on each
-monitor, then draws dashed horizontal and vertical Cairo lines only on the
-monitor containing the cursor. The cursor position is read from Hyprland.
+The plugin draws directly inside Hyprland's software cursor render path. There
+is no GTK window, no layer-shell overlay, and no separate process to keep
+running.
 
 ## Features
 
-- Full-screen crosshair following the pointer
-- Multi-monitor aware using global monitor geometry
-- Click-through overlay; it does not steal mouse or keyboard focus
-- About 120 Hz cursor sampling by default
-- Narrow damage redraws instead of repainting entire monitors on every cursor move
-- Uses the pywal accent color and updates live when colors change
-- Optional `wlsunset` gamma boost while the crosshair is running
-
-## Requirements
-
-Runtime:
-
-- Wayland compositor with `wlr-layer-shell`
-- Hyprland, for `hyprctl cursorpos`
-- GTK 3
-- gtk-layer-shell
-- Cairo
-- `wlsunset`, optional
-
-Build:
-
-- `gcc`
-- `make`
-- `pkg-config`
-- GTK 3 development files
-- gtk-layer-shell development files
-- Cairo development files
-
-Arch:
-
-```sh
-sudo pacman -S gcc make pkgconf gtk3 gtk-layer-shell cairo
-```
-
-Ubuntu:
-
-```sh
-sudo apt-get install build-essential pkg-config libgtk-3-dev libgtk-layer-shell-dev libcairo2-dev
-```
+- Hides the normal cursor by skipping Hyprland's software cursor draw
+- Forces software cursor mode while loaded, then restores it on unload
+- Draws a full-screen dashed crosshair on the monitor containing the pointer
+- Keeps the rotating HUD visible all the time
+- Changes only the center marker for cursor intent:
+  - bigger dot for links/pointers
+  - I-beam for text
+  - horizontal I-beam for vertical text
+  - marks for move/grab/resize/not-allowed/wait
+- Reads cursor position and cursor shape intent directly from Hyprland internals
+- Uses `CROSSHAIR_COLOR=#rrggbb`, pywal `color1`, or white fallback
 
 ## Build
+
+Requirements:
+
+- Hyprland headers matching the running Hyprland build
+- `g++`
+- `make`
+- `pkg-config`
+
+Build:
 
 ```sh
 make
 ```
 
-The binary is written to:
+Output:
 
 ```sh
-./crosshair
+./crosshair.so
 ```
 
-Clean build output:
+Clean:
 
 ```sh
 make clean
 ```
 
-## Usage
+## Manual Load
 
-Run the overlay:
-
-```sh
-./crosshair
-```
-
-Run with a temporary gamma boost through `wlsunset`:
+Load:
 
 ```sh
-./crosshair 1.2
+hyprctl plugin load "$PWD/crosshair.so"
 ```
 
-Stop it:
+Unload:
 
 ```sh
-pkill crosshair
+hyprctl plugin unload "$PWD/crosshair.so"
 ```
+
+Status:
+
+```sh
+hyprctl crosshair
+hyprctl -j crosshair
+```
+
+## hyprpm
+
+After this repo is committed and pushed:
+
+```sh
+hyprpm add https://github.com/warpcli/crosshair.git
+hyprpm enable crosshair
+hyprpm reload
+```
+
+For local development, build with `make` and use `hyprctl plugin load` so you can
+iterate without waiting on a pushed commit.
 
 ## Color
 
-The crosshair color is loaded in this order:
+The color is loaded when the plugin starts, in this order:
 
 1. `CROSSHAIR_COLOR=#rrggbb`
-2. `~/.cache/wal/colors.json`, using `colors.color1`
+2. `~/.cache/wal/colors.json`, using `color1`
 3. `~/.cache/wal/colors`, using the second line
 4. white fallback
 
-Examples:
-
-```sh
-CROSSHAIR_COLOR=#ff005f ./crosshair
-```
-
-When `CROSSHAIR_COLOR` is not set, the app watches both pywal files and reloads
-the color live after theme changes.
-
-## Release
-
-GitHub Actions builds release artifacts when a tag matching `v*` is pushed:
-
-```sh
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The release contains:
-
-- `wayland-crosshair-linux-x86_64.tar.gz`
-- `wayland-crosshair-linux-aarch64.tar.gz`
-- `checksums.txt`
-
-The published binary is dynamically linked. Target machines still need the
-runtime libraries listed above.
+Reload the plugin after changing the color source.
 
 ## Notes
 
-This project currently keeps GTK because GTK plus gtk-layer-shell provides the
-Wayland windowing and layer-shell plumbing. Cairo only draws pixels; it does not
-create a Wayland overlay by itself.
+Hyprland plugins are ABI-bound to Hyprland. Build this plugin against the same
+headers as the running compositor. If `hyprpm` reports a header mismatch, run:
+
+```sh
+hyprpm update
+```
