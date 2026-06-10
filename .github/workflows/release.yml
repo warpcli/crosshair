@@ -83,6 +83,7 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           gh release create "$TAG_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
             dist/wayland-crosshair-linux-x86_64.tar.gz \
             dist/wayland-crosshair-linux-aarch64.tar.gz \
             dist/checksums.txt \
