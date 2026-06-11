@@ -6,7 +6,7 @@ all: plugin
 
 plugin: crosshair.so
 
-crosshair.so: plugin/crosshair.cpp
+crosshair.so: plugin/crosshair.cpp plugin/crosshair/*.hpp
 	$(CXX) -o crosshair.so plugin/crosshair.cpp $(PLUGIN_CXXFLAGS)
 
 clean:

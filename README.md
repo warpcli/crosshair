@@ -19,6 +19,7 @@ running.
   - marks for move/grab/resize/not-allowed/wait
 - Reads cursor position and cursor shape intent directly from Hyprland internals
 - Uses `CROSSHAIR_COLOR=#rrggbb`, pywal `color1`, or white fallback
+- Draws a `color0` shadow behind the lines, center glyphs, pulses, and label boxes
 
 ## Build
 
@@ -89,6 +90,9 @@ The color is loaded when the plugin starts, in this order:
 2. `~/.cache/wal/colors.json`, using `color1`
 3. `~/.cache/wal/colors`, using the second line
 4. white fallback
+
+The shadow is loaded from pywal `color0` when available, with black fallback.
+`CROSSHAIR_COLOR` only changes the accent color.
 
 Reload the plugin after changing the color source.
 
