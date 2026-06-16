@@ -22,22 +22,33 @@ static void on_mouse_button(const IPointer::SButtonEvent& event, Event::SCallbac
     damage_crosshair_at(position);
 }
 
-static void trigger_scroll_chevron(int direction) {
-    if (direction == 0)
+static void push_chevron_inertia(const Vector2D& direction, double speed) {
+    const SInertia inertia = inertia_from_delta(direction, 0.01);
+    if (!inertia.active)
         return;
 
     if (g_pPointerManager)
         damage_crosshair_at(g_pPointerManager->position());
 
-    g_scroll_chevron_direction = direction;
-    g_scroll_chevron_started   = steady_seconds();
+    const double impulse = std::clamp(speed, 0.0, 1.0);
+    const Vector2D current = g_scroll_chevron_direction * g_scroll_chevron_speed;
+    const Vector2D incoming = inertia.direction * impulse;
+    const SInertia combined = inertia_from_delta(current * 0.62 + incoming, 0.01);
+    if (combined.active)
+        g_scroll_chevron_direction = combined.direction;
+
+    const double now = steady_seconds();
+    g_scroll_chevron_speed   = std::clamp(std::max(g_scroll_chevron_speed * 0.82, impulse), 0.0, 1.0);
+    g_scroll_chevron_started = now;
+    if (g_scroll_chevron_tick < 0.0)
+        g_scroll_chevron_tick = now;
 
     if (g_pPointerManager)
         damage_crosshair_at(g_pPointerManager->position());
 }
 
 static void on_mouse_axis(const IPointer::SAxisEvent& event, Event::SCallbackInfo&) {
-    if (event.axis != WL_POINTER_AXIS_VERTICAL_SCROLL)
+    if (event.axis != WL_POINTER_AXIS_VERTICAL_SCROLL && event.axis != WL_POINTER_AXIS_HORIZONTAL_SCROLL)
         return;
 
     double delta = event.delta;
@@ -46,7 +57,23 @@ static void on_mouse_axis(const IPointer::SAxisEvent& event, Event::SCallbackInf
     if (std::abs(delta) < 0.01)
         return;
 
-    trigger_scroll_chevron(delta > 0.0 ? 1 : -1);
+    const bool continuing_gesture = g_scroll_axis_time_ms != 0 && event.timeMs - g_scroll_axis_time_ms <= SCROLL_AXIS_COALESCE_MS;
+    const uint32_t elapsed_ms = continuing_gesture ? event.timeMs - g_scroll_axis_time_ms : 0;
+    if (!continuing_gesture)
+        g_scroll_axis_accumulator = {0, 0};
+
+    g_scroll_axis_time_ms = event.timeMs;
+    if (event.axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL)
+        g_scroll_axis_accumulator.x += delta;
+    else
+        g_scroll_axis_accumulator.y += delta;
+
+    const double interval_ms = std::max(1.0, static_cast<double>(elapsed_ms == 0 ? SCROLL_SPEED_FRAME_MS : elapsed_ms));
+    const double frame_delta = std::abs(delta) * SCROLL_SPEED_FRAME_MS / interval_ms;
+    const double speed = std::sqrt(std::clamp(frame_delta * SCROLL_SPEED_SCALE, 0.0, 1.0));
+    const double blended_speed = continuing_gesture ? std::max(g_scroll_chevron_speed * 0.74, speed) : speed;
+
+    push_chevron_inertia(g_scroll_axis_accumulator, blended_speed);
 }
 
 static void on_keyboard_key(const IKeyboard::SKeyEvent& event, Event::SCallbackInfo&) {

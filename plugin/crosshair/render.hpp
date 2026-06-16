@@ -81,19 +81,49 @@ static void cairo_draw_center_cross(cairo_t* cr, double cx, double cy, double si
     cairo_stroke_shadowed(cr, alpha);
 }
 
-static void cairo_draw_scroll_chevron(cairo_t* cr, double cx, double cy, double size, int direction, double alpha) {
+static void advance_chevron_inertia() {
+    const double now = steady_seconds();
+    if (g_scroll_chevron_tick < 0.0) {
+        g_scroll_chevron_tick = now;
+        return;
+    }
+
+    const double dt = std::clamp(now - g_scroll_chevron_tick, 0.0, 0.08);
+    g_scroll_chevron_tick = now;
+
+    if (g_scroll_chevron_speed <= 0.0)
+        return;
+
+    g_scroll_chevron_speed *= std::exp(-CHEVRON_INERTIA_DECAY * dt);
+    if (g_scroll_chevron_speed < CHEVRON_MIN_SPEED)
+        g_scroll_chevron_speed = 0.0;
+}
+
+static void cairo_draw_scroll_chevron(cairo_t* cr, double cx, double cy, double size, const Vector2D& direction, double spread, double alpha) {
+    const SInertia inertia = inertia_from_delta(direction, 0.01);
+    if (!inertia.active)
+        return;
+
+    const double dx = inertia.direction.x;
+    const double dy = inertia.direction.y;
+    const double pxn = -dy;
+    const double pyn = dx;
+    const double motion = std::clamp(spread, -0.45, 1.0);
     const double half_width = px(size);
     const double half_height = px(size * 0.42);
-    const double gap = px(size * 0.36);
+    const double gap = px(size * (0.36 + 0.24 * motion));
 
     for (double offset : {-gap, gap}) {
-        const double chevron_center_y = cy + direction * offset;
-        const double tip_y = chevron_center_y + direction * half_height;
-        const double wing_y = chevron_center_y - direction * half_height;
+        const double chevron_center_x = cx + dx * offset;
+        const double chevron_center_y = cy + dy * offset;
+        const double tip_x = chevron_center_x + dx * half_height;
+        const double tip_y = chevron_center_y + dy * half_height;
+        const double wing_x = chevron_center_x - dx * half_height;
+        const double wing_y = chevron_center_y - dy * half_height;
 
-        cairo_move_to(cr, cx - half_width, wing_y);
-        cairo_line_to(cr, cx, tip_y);
-        cairo_line_to(cr, cx + half_width, wing_y);
+        cairo_move_to(cr, wing_x - pxn * half_width, wing_y - pyn * half_width);
+        cairo_line_to(cr, tip_x, tip_y);
+        cairo_line_to(cr, wing_x + pxn * half_width, wing_y + pyn * half_width);
     }
     cairo_stroke_shadowed(cr, alpha);
 }
@@ -239,15 +269,21 @@ static void queue_badge_label(const std::string& text, double anchor_x, double a
 }
 
 static void cairo_draw_center_glyph(cairo_t* cr, double cx, double cy) {
+    advance_chevron_inertia();
+
     const double key_pulse = active_pulse(g_key_pulse_started, KEY_PULSE_DURATION);
     const double scroll_age = steady_seconds() - g_scroll_chevron_started;
-    const bool scroll_active = scroll_age >= 0.0 && scroll_age <= SCROLL_CHEVRON_DURATION;
-    const double scroll_pulse = scroll_active ? std::sin(std::clamp(scroll_age / SCROLL_CHEVRON_DURATION, 0.0, 1.0) * CROSSHAIR_PI) : 0.0;
+    const bool scroll_active = g_scroll_chevron_speed > 0.0 && scroll_age >= 0.0 && scroll_age <= SCROLL_CHEVRON_DURATION;
+    const double scroll_pulse = scroll_age >= 0.0 && scroll_age <= SCROLL_CHEVRON_DURATION
+        ? std::sin(std::clamp(scroll_age / SCROLL_CHEVRON_DURATION, 0.0, 1.0) * CROSSHAIR_PI)
+        : 0.0;
 
     cairo_set_line_width(cr, px(LINE_WIDTH));
 
-    if (scroll_active && g_scroll_chevron_direction != 0) {
-        cairo_draw_scroll_chevron(cr, cx, cy, 12.0 + 3.0 * std::max(key_pulse, scroll_pulse), g_scroll_chevron_direction, 0.95);
+    if (scroll_active && vector_length(g_scroll_chevron_direction) > 0.0) {
+        const double speed_pulse = std::clamp(g_scroll_chevron_speed, 0.0, 1.0);
+        const double size = 12.0 + 3.0 * std::max(key_pulse, scroll_pulse);
+        cairo_draw_scroll_chevron(cr, cx, cy, size, g_scroll_chevron_direction, speed_pulse, 0.78 + 0.18 * std::max(speed_pulse, scroll_pulse));
         return;
     }
 

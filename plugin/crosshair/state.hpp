@@ -19,6 +19,11 @@ static constexpr double KEY_PULSE_DURATION   = 0.28;
 static constexpr double MODIFIER_PULSE_DURATION = 0.65;
 static constexpr double CTRL_TRIPLE_TAP_WINDOW = 1.0;
 static constexpr double SCROLL_CHEVRON_DURATION = 0.24;
+static constexpr uint32_t SCROLL_AXIS_COALESCE_MS = 18;
+static constexpr double SCROLL_SPEED_FRAME_MS = 16.0;
+static constexpr double SCROLL_SPEED_SCALE = 4.0;
+static constexpr double CHEVRON_INERTIA_DECAY = 4.8;
+static constexpr double CHEVRON_MIN_SPEED = 0.018;
 
 enum CursorIntent {
     INTENT_DEFAULT,
@@ -53,7 +58,11 @@ static bool                g_drag_active               = false;
 static double              g_key_pulse_started         = -10.0;
 static double              g_modifier_pulse_started    = -10.0;
 static double              g_scroll_chevron_started    = -10.0;
-static int                 g_scroll_chevron_direction  = 0;
+static Vector2D            g_scroll_chevron_direction  = {0, 0};
+static double              g_scroll_chevron_speed      = 0.0;
+static double              g_scroll_chevron_tick       = -10.0;
+static Vector2D            g_scroll_axis_accumulator   = {0, 0};
+static uint32_t            g_scroll_axis_time_ms       = 0;
 static double              g_ctrl_tap_started          = -10.0;
 static int                 g_ctrl_tap_count            = 0;
 static uint32_t            g_last_modifier_mask        = 0;
