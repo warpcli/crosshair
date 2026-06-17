@@ -1,5 +1,12 @@
 #pragma once
 
+static void on_mouse_move(const Vector2D&, Event::SCallbackInfo&) {
+    if (!g_pPointerManager || !g_confine_enabled || g_confine_warping)
+        return;
+
+    confine_pointer_position(g_pPointerManager->position());
+}
+
 static void on_mouse_button(const IPointer::SButtonEvent& event, Event::SCallbackInfo&) {
     if (!g_pPointerManager)
         return;
@@ -85,6 +92,11 @@ static void on_keyboard_key(const IKeyboard::SKeyEvent& event, Event::SCallbackI
     else
         g_ctrl_tap_count = 0;
 
+    if (is_super_keycode(event.keycode))
+        register_super_tap();
+    else
+        g_super_tap_count = 0;
+
     trigger_key_pulse(is_pulse_modifier_keycode(event.keycode));
 }
 
@@ -108,7 +120,7 @@ static void on_timer(SP<CEventLoopTimer> self, void*) {
         g_last_modifier_mask = modifier_mask;
     }
 
-    const Vector2D position = g_pPointerManager->position();
+    const Vector2D position = confine_pointer_position(g_pPointerManager->position());
     if (!g_crosshair_visible) {
         g_last_position      = position;
         g_have_last_position = true;
@@ -148,6 +160,37 @@ static void hk_renderer_set_cursor_from_name(Render::IHyprRenderer* renderer, co
 static void hk_cursor_manager_set_cursor_from_name(CCursorManager* manager, const std::string& name) {
     set_shape(name.empty() ? "default" : name);
     ((CursorManagerSetCursorFromNameFn)g_cursor_manager_name_hook->m_original)(manager, name);
+}
+
+static void hk_pointer_manager_move(CPointerManager* manager, const Vector2D& delta) {
+    if (!g_confine_enabled || g_confine_warping) {
+        ((PointerManagerMoveFn)g_pointer_move_hook->m_original)(manager, delta);
+        return;
+    }
+
+    const PHLWINDOW window = active_window();
+    if (!window || window->m_size.x <= 2.0 || window->m_size.y <= 2.0) {
+        ((PointerManagerMoveFn)g_pointer_move_hook->m_original)(manager, delta);
+        return;
+    }
+
+    const Vector2D current = manager->position();
+    const Vector2D target = current + delta;
+    const Vector2D clamped = clamped_to_window(target, window);
+    ((PointerManagerMoveFn)g_pointer_move_hook->m_original)(manager, clamped - current);
+}
+
+static void hk_input_manager_on_mouse_moved(CInputManager* manager, IPointer::SMotionEvent event) {
+    if (g_confine_enabled && !g_confine_warping && g_pPointerManager) {
+        const PHLWINDOW window = active_window();
+        if (window && window->m_size.x > 2.0 && window->m_size.y > 2.0) {
+            const Vector2D current = g_pPointerManager->position();
+            const Vector2D clamped = clamped_to_window(current + event.delta, window);
+            event.delta = clamped - current;
+        }
+    }
+
+    ((InputManagerOnMouseMovedFn)g_input_mouse_moved_hook->m_original)(manager, event);
 }
 
 static CFunctionHook* hook_demangled_match(const std::string& query, const std::string& demangled_part, void* destination) {
@@ -200,6 +243,12 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
         set_minimal_mode(false);
     } else if (action == "toggle-minimal" || action == "minimal-toggle") {
         toggle_minimal_mode();
+    } else if (action == "confine" || action == "confine-on" || action == "confine-enable") {
+        set_confine_enabled(true);
+    } else if (action == "unconfine" || action == "confine-off" || action == "confine-disable") {
+        set_confine_enabled(false);
+    } else if (action == "toggle-confine" || action == "confine-toggle") {
+        toggle_confine_enabled();
     }
 
     const bool ready = g_software_cursor_hook && g_locked_software_cursor;
@@ -216,10 +265,13 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
                "\"shape\":\"" + g_last_shape + "\","
                "\"visible\":" + (g_crosshair_visible ? "true" : "false") + ","
                "\"minimal_mode\":" + (g_minimal_mode ? "true" : "false") + ","
+               "\"confine_enabled\":" + (g_confine_enabled ? "true" : "false") + ","
                "\"color\":\"" + color + "\","
                "\"background\":\"" + background + "\","
                "\"shadow\":\"" + shadow + "\","
                "\"software_cursor_hook\":" + (g_software_cursor_hook ? "true" : "false") + ","
+               "\"pointer_move_hook\":" + (g_pointer_move_hook ? "true" : "false") + ","
+               "\"input_mouse_moved_hook\":" + (g_input_mouse_moved_hook ? "true" : "false") + ","
                "\"renderer_hook\":" + (g_renderer_name_hook ? "true" : "false") + ","
                "\"cursor_manager_hook\":" + (g_cursor_manager_name_hook ? "true" : "false") + ","
                "\"software_cursor_locked\":" + (g_locked_software_cursor ? "true" : "false") + ","
@@ -237,10 +289,13 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
            "shape: " + g_last_shape + "\n"
            "visible: " + (g_crosshair_visible ? "yes" : "no") + "\n"
            "minimal_mode: " + (g_minimal_mode ? "yes" : "no") + "\n"
+           "confine_enabled: " + (g_confine_enabled ? "yes" : "no") + "\n"
            "color: " + color + "\n"
            "background: " + background + "\n"
            "shadow: " + shadow + "\n"
            "software_cursor_hook: " + (g_software_cursor_hook ? "yes" : "no") + "\n"
+           "pointer_move_hook: " + (g_pointer_move_hook ? "yes" : "no") + "\n"
+           "input_mouse_moved_hook: " + (g_input_mouse_moved_hook ? "yes" : "no") + "\n"
            "renderer_hook: " + (g_renderer_name_hook ? "yes" : "no") + "\n"
            "cursor_manager_hook: " + (g_cursor_manager_name_hook ? "yes" : "no") + "\n"
            "software_cursor_locked: " + (g_locked_software_cursor ? "yes" : "no") + "\n"

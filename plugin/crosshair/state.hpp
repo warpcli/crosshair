@@ -18,6 +18,7 @@ static constexpr double DRAG_LABEL_THRESHOLD = 10.0;
 static constexpr double KEY_PULSE_DURATION   = 0.28;
 static constexpr double MODIFIER_PULSE_DURATION = 0.65;
 static constexpr double CTRL_TRIPLE_TAP_WINDOW = 1.0;
+static constexpr double SUPER_TRIPLE_TAP_WINDOW = 1.0;
 static constexpr double SCROLL_CHEVRON_DURATION = 0.24;
 static constexpr uint32_t SCROLL_AXIS_COALESCE_MS = 18;
 static constexpr double SCROLL_SPEED_FRAME_MS = 16.0;
@@ -40,12 +41,15 @@ enum CursorIntent {
 static HANDLE              g_handle                   = nullptr;
 static CHyprSignalListener g_shape_listener;
 static CHyprSignalListener g_cursor_changed_listener;
+static CHyprSignalListener g_mouse_move_listener;
 static CHyprSignalListener g_mouse_button_listener;
 static CHyprSignalListener g_mouse_axis_listener;
 static CHyprSignalListener g_keyboard_key_listener;
 static CFunctionHook*      g_renderer_name_hook       = nullptr;
 static CFunctionHook*      g_cursor_manager_name_hook = nullptr;
 static CFunctionHook*      g_software_cursor_hook     = nullptr;
+static CFunctionHook*      g_pointer_move_hook        = nullptr;
+static CFunctionHook*      g_input_mouse_moved_hook   = nullptr;
 static SP<SHyprCtlCommand> g_status_command;
 static SP<CEventLoopTimer> g_timer;
 static std::string         g_last_shape                = "default";
@@ -65,10 +69,14 @@ static Vector2D            g_scroll_axis_accumulator   = {0, 0};
 static uint32_t            g_scroll_axis_time_ms       = 0;
 static double              g_ctrl_tap_started          = -10.0;
 static int                 g_ctrl_tap_count            = 0;
+static double              g_super_tap_started         = -10.0;
+static int                 g_super_tap_count           = 0;
 static uint32_t            g_last_modifier_mask        = 0;
 static bool                g_locked_software_cursor    = false;
 static bool                g_crosshair_visible         = true;
 static bool                g_minimal_mode              = false;
+static bool                g_confine_enabled           = false;
+static bool                g_confine_warping           = false;
 static double              g_color_r                   = 1.0;
 static double              g_color_g                   = 1.0;
 static double              g_color_b                   = 1.0;
@@ -92,6 +100,8 @@ struct SInertia {
 
 using RendererSetCursorFromNameFn = void (*)(Render::IHyprRenderer*, const std::string&, bool);
 using CursorManagerSetCursorFromNameFn = void (*)(CCursorManager*, const std::string&);
+using PointerManagerMoveFn = void (*)(CPointerManager*, const Vector2D&);
+using InputManagerOnMouseMovedFn = void (*)(CInputManager*, IPointer::SMotionEvent);
 using RenderSoftwareCursorsForFn = void (*)(CPointerManager*, PHLMONITOR, const Time::steady_tp&, CRegion&, std::optional<Vector2D>, bool);
 
 static void damage_crosshair_at(const Vector2D& global);

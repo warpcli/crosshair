@@ -58,10 +58,14 @@ static bool is_ctrl_keycode(uint32_t keycode) {
     return keycode == KEY_LEFTCTRL || keycode == KEY_RIGHTCTRL;
 }
 
+static bool is_super_keycode(uint32_t keycode) {
+    return keycode == KEY_LEFTMETA || keycode == KEY_RIGHTMETA;
+}
+
 static bool is_pulse_modifier_keycode(uint32_t keycode) {
     return is_ctrl_keycode(keycode)
         || keycode == KEY_LEFTALT || keycode == KEY_RIGHTALT
-        || keycode == KEY_LEFTMETA || keycode == KEY_RIGHTMETA;
+        || is_super_keycode(keycode);
 }
 
 static uint32_t pulse_modifier_mask(uint32_t modifiers) {
@@ -95,6 +99,18 @@ static void toggle_minimal_mode() {
     set_minimal_mode(!g_minimal_mode);
 }
 
+static void set_confine_enabled(bool enabled) {
+    if (g_confine_enabled == enabled)
+        return;
+
+    g_confine_enabled = enabled;
+    trigger_key_pulse(true);
+}
+
+static void toggle_confine_enabled() {
+    set_confine_enabled(!g_confine_enabled);
+}
+
 static void register_ctrl_tap() {
     const double now = steady_seconds();
     if (now - g_ctrl_tap_started > CTRL_TRIPLE_TAP_WINDOW) {
@@ -109,4 +125,67 @@ static void register_ctrl_tap() {
         g_ctrl_tap_count   = 0;
         toggle_minimal_mode();
     }
+}
+
+static void register_super_tap() {
+    const double now = steady_seconds();
+    if (now - g_super_tap_started > SUPER_TRIPLE_TAP_WINDOW) {
+        g_super_tap_started = now;
+        g_super_tap_count   = 1;
+        return;
+    }
+
+    ++g_super_tap_count;
+    if (g_super_tap_count >= 3) {
+        g_super_tap_started = -10.0;
+        g_super_tap_count   = 0;
+        toggle_confine_enabled();
+    }
+}
+
+static PHLWINDOW active_window() {
+    if (!g_pCompositor)
+        return nullptr;
+
+    for (const auto& window : g_pCompositor->m_windows) {
+        if (!window || !window->m_isMapped)
+            continue;
+        if (g_pCompositor->isWindowActive(window))
+            return window;
+    }
+
+    return nullptr;
+}
+
+static Vector2D clamped_to_window(const Vector2D& position, PHLWINDOW window) {
+    constexpr double INSET = 1.0;
+    const double min_x = window->m_position.x + INSET;
+    const double min_y = window->m_position.y + INSET;
+    const double max_x = window->m_position.x + std::max(INSET, window->m_size.x - INSET);
+    const double max_y = window->m_position.y + std::max(INSET, window->m_size.y - INSET);
+
+    return {
+        std::clamp(position.x, min_x, max_x),
+        std::clamp(position.y, min_y, max_y),
+    };
+}
+
+static Vector2D confine_pointer_position(const Vector2D& position) {
+    if (!g_confine_enabled || g_confine_warping || !g_pPointerManager)
+        return position;
+
+    const PHLWINDOW window = active_window();
+    if (!window || window->m_size.x <= 2.0 || window->m_size.y <= 2.0)
+        return position;
+
+    const Vector2D clamped = clamped_to_window(position, window);
+    if (clamped == position)
+        return position;
+
+    damage_crosshair_at(position);
+    g_confine_warping = true;
+    g_pPointerManager->warpTo(clamped);
+    g_confine_warping = false;
+    damage_crosshair_at(clamped);
+    return clamped;
 }

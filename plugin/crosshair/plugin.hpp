@@ -24,6 +24,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
     }
 
     if (Event::bus()) {
+        g_mouse_move_listener = Event::bus()->m_events.input.mouse.move.listen(on_mouse_move);
         g_mouse_button_listener = Event::bus()->m_events.input.mouse.button.listen(on_mouse_button);
         g_mouse_axis_listener = Event::bus()->m_events.input.mouse.axis.listen(on_mouse_axis);
         g_keyboard_key_listener = Event::bus()->m_events.input.keyboard.key.listen(on_keyboard_key);
@@ -37,6 +38,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO pluginInit(HANDLE handle) {
 
     g_software_cursor_hook =
         hook_demangled_match("renderSoftwareCursorsFor", "CPointerManager::renderSoftwareCursorsFor", (void*)&hk_render_software_cursors_for);
+    g_pointer_move_hook =
+        hook_demangled_match("move", "CPointerManager::move", (void*)&hk_pointer_manager_move);
+    g_input_mouse_moved_hook =
+        hook_demangled_match("onMouseMoved", "CInputManager::onMouseMoved", (void*)&hk_input_manager_on_mouse_moved);
     g_renderer_name_hook =
         hook_demangled_match("setCursorFromName", "Render::IHyprRenderer::setCursorFromName", (void*)&hk_renderer_set_cursor_from_name);
     g_cursor_manager_name_hook =
@@ -77,6 +82,7 @@ APICALL EXPORT void pluginExit() {
 
     g_shape_listener.reset();
     g_cursor_changed_listener.reset();
+    g_mouse_move_listener.reset();
     g_mouse_button_listener.reset();
     g_mouse_axis_listener.reset();
     g_keyboard_key_listener.reset();
@@ -89,6 +95,16 @@ APICALL EXPORT void pluginExit() {
     if (g_software_cursor_hook) {
         HyprlandAPI::removeFunctionHook(g_handle, g_software_cursor_hook);
         g_software_cursor_hook = nullptr;
+    }
+
+    if (g_pointer_move_hook) {
+        HyprlandAPI::removeFunctionHook(g_handle, g_pointer_move_hook);
+        g_pointer_move_hook = nullptr;
+    }
+
+    if (g_input_mouse_moved_hook) {
+        HyprlandAPI::removeFunctionHook(g_handle, g_input_mouse_moved_hook);
+        g_input_mouse_moved_hook = nullptr;
     }
 
     if (g_renderer_name_hook) {
