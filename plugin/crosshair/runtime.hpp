@@ -183,7 +183,8 @@ static void hk_pointer_manager_move(CPointerManager* manager, const Vector2D& de
 static void hk_input_manager_on_mouse_moved(CInputManager* manager, IPointer::SMotionEvent event) {
     if (g_confine_enabled && !g_confine_warping && g_pPointerManager) {
         const PHLWINDOW window = active_window();
-        if (window && window->m_size.x > 2.0 && window->m_size.y > 2.0) {
+        const CBox box = confine_window_box(window);
+        if (window && box.w > 2.0 && box.h > 2.0) {
             const Vector2D current = g_pPointerManager->position();
             const Vector2D clamped = clamped_to_window(current + event.delta, window);
             event.delta = clamped - current;

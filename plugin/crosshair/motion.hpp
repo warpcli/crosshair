@@ -103,8 +103,14 @@ static void set_confine_enabled(bool enabled) {
     if (g_confine_enabled == enabled)
         return;
 
+    if (g_pPointerManager)
+        damage_crosshair_at(g_pPointerManager->position());
+
     g_confine_enabled = enabled;
     trigger_key_pulse(true);
+
+    if (g_pPointerManager)
+        damage_crosshair_at(g_pPointerManager->position());
 }
 
 static void toggle_confine_enabled() {
@@ -157,12 +163,20 @@ static PHLWINDOW active_window() {
     return nullptr;
 }
 
+static CBox confine_window_box(PHLWINDOW window) {
+    if (!window)
+        return CBox{0, 0, 0, 0};
+
+    return window->getWindowMainSurfaceBox();
+}
+
 static Vector2D clamped_to_window(const Vector2D& position, PHLWINDOW window) {
     constexpr double INSET = 1.0;
-    const double min_x = window->m_position.x + INSET;
-    const double min_y = window->m_position.y + INSET;
-    const double max_x = window->m_position.x + std::max(INSET, window->m_size.x - INSET);
-    const double max_y = window->m_position.y + std::max(INSET, window->m_size.y - INSET);
+    const CBox box = confine_window_box(window);
+    const double min_x = box.x + INSET;
+    const double min_y = box.y + INSET;
+    const double max_x = box.x + std::max(INSET, box.w - INSET);
+    const double max_y = box.y + std::max(INSET, box.h - INSET);
 
     return {
         std::clamp(position.x, min_x, max_x),
@@ -175,7 +189,8 @@ static Vector2D confine_pointer_position(const Vector2D& position) {
         return position;
 
     const PHLWINDOW window = active_window();
-    if (!window || window->m_size.x <= 2.0 || window->m_size.y <= 2.0)
+    const CBox box = confine_window_box(window);
+    if (!window || box.w <= 2.0 || box.h <= 2.0)
         return position;
 
     const Vector2D clamped = clamped_to_window(position, window);

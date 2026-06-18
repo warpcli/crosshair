@@ -343,12 +343,33 @@ static std::string drag_pixel_label(const Vector2D& current) {
     return std::to_string(dx) + " x " + std::to_string(dy) + "px";
 }
 
-static void draw_direction_labels(PHLMONITOR monitor, const Vector2D& local, double x, double y, const CRegion& damage) {
-    const double w      = monitor->m_size.x * g_render_scale;
-    const double offset = px(LABEL_OFFSET);
+static CBox active_confine_box_local(PHLMONITOR monitor) {
+    if (!g_confine_enabled)
+        return CBox{0, 0, monitor->m_size.x, monitor->m_size.y};
 
-    queue_badge_label(pixel_label(monitor->m_size.x - local.x), w - offset, y - px(9.0), 1.0, 1.0, false, damage);
-    queue_badge_label(pixel_label(local.y), x + px(9.0), offset, 0.0, 0.0, true, damage);
+    const PHLWINDOW window = active_window();
+    if (!window)
+        return CBox{0, 0, monitor->m_size.x, monitor->m_size.y};
+
+    const CBox window_box = confine_window_box(window);
+    const double left = std::max(0.0, window_box.x - monitor->m_position.x);
+    const double top = std::max(0.0, window_box.y - monitor->m_position.y);
+    const double right = std::min(monitor->m_size.x, window_box.x + window_box.w - monitor->m_position.x);
+    const double bottom = std::min(monitor->m_size.y, window_box.y + window_box.h - monitor->m_position.y);
+
+    if (right <= left || bottom <= top)
+        return CBox{0, 0, 0, 0};
+
+    return CBox{left, top, right - left, bottom - top};
+}
+
+static void draw_direction_labels(PHLMONITOR monitor, const Vector2D& local, double x, double y, const CRegion& damage, const CBox& bounds) {
+    const double offset = px(LABEL_OFFSET);
+    const double top    = bounds.y * g_render_scale;
+    const double right  = (bounds.x + bounds.w) * g_render_scale;
+
+    queue_badge_label(pixel_label(bounds.x + bounds.w - local.x), right - offset, y - px(9.0), 1.0, 1.0, false, damage);
+    queue_badge_label(pixel_label(local.y - bounds.y), x + px(9.0), top + offset, 0.0, 0.0, true, damage);
 }
 
 static void draw_drag_label(const Vector2D& global, double x, double y, const CRegion& damage) {
@@ -363,42 +384,47 @@ static void draw_drag_label(const Vector2D& global, double x, double y, const CR
     queue_badge_label(drag_pixel_label(global), x + offset.x, y + offset.y, align_x, align_y, false, damage, true);
 }
 
-static void draw_projected_line_labels(PHLMONITOR monitor, const Vector2D& local, const CRegion& damage) {
-    const double w      = monitor->m_size.x * g_render_scale;
-    const double h      = monitor->m_size.y * g_render_scale;
+static void draw_projected_line_labels(PHLMONITOR monitor, const Vector2D& local, const CRegion& damage, const CBox& bounds) {
     const double offset = px(LABEL_OFFSET);
-    const bool draws_vertical = local.x >= 0 && local.x < monitor->m_size.x;
-    const bool draws_horizontal = local.y >= 0 && local.y < monitor->m_size.y;
+    const double left   = bounds.x * g_render_scale;
+    const double top    = bounds.y * g_render_scale;
+    const double right  = (bounds.x + bounds.w) * g_render_scale;
+    const double bottom = (bounds.y + bounds.h) * g_render_scale;
+    const bool draws_vertical = local.x >= bounds.x && local.x < bounds.x + bounds.w;
+    const bool draws_horizontal = local.y >= bounds.y && local.y < bounds.y + bounds.h;
     const bool cursor_inside = draws_vertical && draws_horizontal;
     if (cursor_inside)
         return;
 
     if (draws_horizontal) {
         const double y = std::round(local.y * g_render_scale);
-        queue_badge_label(pixel_label(-local.x), offset, y - px(9.0), 0.0, 1.0, false, damage);
-        queue_badge_label(pixel_label(monitor->m_size.x - local.x), w - offset, y - px(9.0), 1.0, 1.0, false, damage);
+        queue_badge_label(pixel_label(bounds.x - local.x), left + offset, y - px(9.0), 0.0, 1.0, false, damage);
+        queue_badge_label(pixel_label(bounds.x + bounds.w - local.x), right - offset, y - px(9.0), 1.0, 1.0, false, damage);
     }
 
     if (draws_vertical) {
         const double x = std::round(local.x * g_render_scale);
-        queue_badge_label(pixel_label(-local.y), x + px(9.0), offset, 0.0, 0.0, true, damage);
-        queue_badge_label(pixel_label(monitor->m_size.y - local.y), x + px(9.0), h - offset, 0.0, 1.0, true, damage);
+        queue_badge_label(pixel_label(bounds.y - local.y), x + px(9.0), top + offset, 0.0, 0.0, true, damage);
+        queue_badge_label(pixel_label(bounds.y + bounds.h - local.y), x + px(9.0), bottom - offset, 0.0, 1.0, true, damage);
     }
 }
 
-static void draw_crosshair_lines(PHLMONITOR monitor, const Vector2D& local, const CRegion& damage) {
-    const double w          = monitor->m_size.x * g_render_scale;
-    const double h          = monitor->m_size.y * g_render_scale;
+static void draw_crosshair_lines(PHLMONITOR monitor, const Vector2D& local, const CRegion& damage, const CBox& bounds) {
+    if (bounds.w <= 0.0 || bounds.h <= 0.0)
+        return;
+
+    const double w          = bounds.w * g_render_scale;
+    const double h          = bounds.h * g_render_scale;
     const int    strip_size = std::max(12, static_cast<int>(std::ceil(px(LINE_WIDTH) + px(8.0))));
     const double strip_mid  = strip_size / 2.0;
     const double gap        = px(CENTER_GAP);
 
     cairo_t* cr = nullptr;
-    const bool draws_vertical   = local.x >= 0 && local.x < monitor->m_size.x;
-    const bool draws_horizontal = local.y >= 0 && local.y < monitor->m_size.y;
+    const bool draws_vertical   = local.x >= bounds.x && local.x < bounds.x + bounds.w;
+    const bool draws_horizontal = local.y >= bounds.y && local.y < bounds.y + bounds.h;
     const bool cursor_inside    = draws_vertical && draws_horizontal;
-    const double x              = std::round(local.x * g_render_scale);
-    const double y              = std::round(local.y * g_render_scale);
+    const double x              = std::round((local.x - bounds.x) * g_render_scale);
+    const double y              = std::round((local.y - bounds.y) * g_render_scale);
     const double vertical_gap_start   = cursor_inside ? std::max(0.0, y - gap) : h;
     const double vertical_gap_end     = cursor_inside ? std::min(h, y + gap) : h;
     const double horizontal_gap_start = cursor_inside ? std::max(0.0, x - gap) : w;
@@ -416,7 +442,7 @@ static void draw_crosshair_lines(PHLMONITOR monitor, const Vector2D& local, cons
         cairo_line_to(cr, strip_mid, h);
         cairo_stroke_shadowed(cr, 0.42);
         cairo_destroy(cr);
-        queue_cairo_texture(vertical, x - strip_mid, 0, strip_size, h, damage);
+        queue_cairo_texture(vertical, bounds.x * g_render_scale + x - strip_mid, bounds.y * g_render_scale, strip_size, h, damage);
         cairo_surface_destroy(vertical);
     }
 
@@ -430,11 +456,11 @@ static void draw_crosshair_lines(PHLMONITOR monitor, const Vector2D& local, cons
         cairo_line_to(cr, w, strip_mid);
         cairo_stroke_shadowed(cr, 0.42);
         cairo_destroy(cr);
-        queue_cairo_texture(horizontal, 0, y - strip_mid, w, strip_size, damage);
+        queue_cairo_texture(horizontal, bounds.x * g_render_scale, bounds.y * g_render_scale + y - strip_mid, w, strip_size, damage);
         cairo_surface_destroy(horizontal);
     }
 
-    draw_projected_line_labels(monitor, local, damage);
+    draw_projected_line_labels(monitor, local, damage, bounds);
 }
 
 static void cairo_draw_modifier_pulse(cairo_t* cr, double center) {
@@ -455,7 +481,7 @@ static void cairo_draw_modifier_pulse(cairo_t* cr, double center) {
     cairo_stroke_shadowed(cr, 0.34 * fade);
 }
 
-static void draw_center_hud(PHLMONITOR monitor, const Vector2D& local, double x, double y, const Time::steady_tp& now, const CRegion& damage) {
+static void draw_center_hud(PHLMONITOR monitor, const Vector2D& local, double x, double y, const Time::steady_tp& now, const CRegion& damage, const CBox& bounds) {
     const int    patch_size = static_cast<int>(std::ceil(px(CENTER_DAMAGE * 2.0)));
     const double center     = patch_size / 2.0;
     cairo_t* cr = nullptr;
@@ -472,7 +498,7 @@ static void draw_center_hud(PHLMONITOR monitor, const Vector2D& local, double x,
     cairo_surface_destroy(patch);
 
     if (!g_minimal_mode)
-        draw_direction_labels(monitor, local, x, y, damage);
+        draw_direction_labels(monitor, local, x, y, damage, bounds);
     draw_drag_label(monitor->m_position + local, x, y, damage);
 }
 
@@ -489,20 +515,22 @@ static void draw_crosshair(PHLMONITOR monitor, const Time::steady_tp& now, CRegi
 
     const Vector2D global = g_pPointerManager->position();
     const Vector2D local  = global - monitor->m_position;
-    const bool cursor_inside = local.x >= 0 && local.y >= 0 && local.x < monitor->m_size.x && local.y < monitor->m_size.y;
-    const bool line_intersects = (local.x >= 0 && local.x < monitor->m_size.x) || (local.y >= 0 && local.y < monitor->m_size.y);
+    const CBox bounds = active_confine_box_local(monitor);
+    const bool cursor_inside = local.x >= bounds.x && local.y >= bounds.y && local.x < bounds.x + bounds.w && local.y < bounds.y + bounds.h;
+    const bool line_intersects = bounds.w > 0.0 && bounds.h > 0.0
+        && ((local.x >= bounds.x && local.x < bounds.x + bounds.w) || (local.y >= bounds.y && local.y < bounds.y + bounds.h));
     if (!line_intersects)
         return;
 
     if (!g_minimal_mode)
-        draw_crosshair_lines(monitor, local, damage);
+        draw_crosshair_lines(monitor, local, damage, bounds);
 
     if (!cursor_inside)
         return;
 
     const double x = std::round(local.x * g_render_scale);
     const double y = std::round(local.y * g_render_scale);
-    draw_center_hud(monitor, local, x, y, now, damage);
+    draw_center_hud(monitor, local, x, y, now, damage, bounds);
 }
 
 static void damage_crosshair_at(const Vector2D& global) {
