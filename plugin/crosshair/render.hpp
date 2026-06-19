@@ -344,12 +344,22 @@ static std::string drag_pixel_label(const Vector2D& current) {
 }
 
 static CBox active_confine_box_local(PHLMONITOR monitor) {
-    if (!g_confine_enabled)
+    if (!confine_effective_enabled())
         return CBox{0, 0, monitor->m_size.x, monitor->m_size.y};
 
     const PHLWINDOW window = active_window();
-    if (!window)
+    if (!window) {
+        if (!g_pPointerManager || !g_pCompositor)
+            return CBox{0, 0, 0, 0};
+
+        PHLMONITOR current_monitor = g_pCompositor->getMonitorFromVector(g_pPointerManager->position());
+        if (!current_monitor)
+            current_monitor = g_pCompositor->getMonitorFromCursor();
+        if (current_monitor != monitor)
+            return CBox{0, 0, 0, 0};
+
         return CBox{0, 0, monitor->m_size.x, monitor->m_size.y};
+    }
 
     const CBox window_box = confine_window_box(window);
     const double left = std::max(0.0, window_box.x - monitor->m_position.x);

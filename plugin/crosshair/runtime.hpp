@@ -84,6 +84,20 @@ static void on_mouse_axis(const IPointer::SAxisEvent& event, Event::SCallbackInf
 }
 
 static void on_keyboard_key(const IKeyboard::SKeyEvent& event, Event::SCallbackInfo&) {
+    const bool super_key = is_super_keycode(event.keycode);
+    if (super_key) {
+        if (g_pPointerManager)
+            damage_crosshair_at(g_pPointerManager->position());
+
+        if (event.state == WL_KEYBOARD_KEY_STATE_PRESSED)
+            ++g_super_held_count;
+        else
+            g_super_held_count = std::max(0, g_super_held_count - 1);
+
+        if (g_pPointerManager)
+            damage_crosshair_at(g_pPointerManager->position());
+    }
+
     if (event.state != WL_KEYBOARD_KEY_STATE_PRESSED)
         return;
 
@@ -92,7 +106,7 @@ static void on_keyboard_key(const IKeyboard::SKeyEvent& event, Event::SCallbackI
     else
         g_ctrl_tap_count = 0;
 
-    if (is_super_keycode(event.keycode))
+    if (super_key)
         register_super_tap();
     else
         g_super_tap_count = 0;
@@ -118,6 +132,7 @@ static void on_timer(SP<CEventLoopTimer> self, void*) {
         if (newly_pressed)
             trigger_key_pulse(true);
         g_last_modifier_mask = modifier_mask;
+        g_super_held_count = (modifier_mask & HL_MODIFIER_META) ? std::max(1, g_super_held_count) : 0;
     }
 
     const Vector2D position = confine_pointer_position(g_pPointerManager->position());
@@ -163,30 +178,29 @@ static void hk_cursor_manager_set_cursor_from_name(CCursorManager* manager, cons
 }
 
 static void hk_pointer_manager_move(CPointerManager* manager, const Vector2D& delta) {
-    if (!g_confine_enabled || g_confine_warping) {
-        ((PointerManagerMoveFn)g_pointer_move_hook->m_original)(manager, delta);
-        return;
-    }
-
-    const PHLWINDOW window = active_window();
-    if (!window || window->m_size.x <= 2.0 || window->m_size.y <= 2.0) {
+    if (!confine_effective_enabled() || g_confine_warping) {
         ((PointerManagerMoveFn)g_pointer_move_hook->m_original)(manager, delta);
         return;
     }
 
     const Vector2D current = manager->position();
+    const CBox box = confine_target_box(current);
+    if (box.w <= 2.0 || box.h <= 2.0) {
+        ((PointerManagerMoveFn)g_pointer_move_hook->m_original)(manager, delta);
+        return;
+    }
+
     const Vector2D target = current + delta;
-    const Vector2D clamped = clamped_to_window(target, window);
+    const Vector2D clamped = clamped_to_box(target, box);
     ((PointerManagerMoveFn)g_pointer_move_hook->m_original)(manager, clamped - current);
 }
 
 static void hk_input_manager_on_mouse_moved(CInputManager* manager, IPointer::SMotionEvent event) {
-    if (g_confine_enabled && !g_confine_warping && g_pPointerManager) {
-        const PHLWINDOW window = active_window();
-        const CBox box = confine_window_box(window);
-        if (window && box.w > 2.0 && box.h > 2.0) {
+    if (confine_effective_enabled() && !g_confine_warping && g_pPointerManager) {
+        const CBox box = confine_target_box(g_pPointerManager->position());
+        if (box.w > 2.0 && box.h > 2.0) {
             const Vector2D current = g_pPointerManager->position();
-            const Vector2D clamped = clamped_to_window(current + event.delta, window);
+            const Vector2D clamped = clamped_to_box(current + event.delta, box);
             event.delta = clamped - current;
         }
     }
@@ -267,6 +281,7 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
                "\"visible\":" + (g_crosshair_visible ? "true" : "false") + ","
                "\"minimal_mode\":" + (g_minimal_mode ? "true" : "false") + ","
                "\"confine_enabled\":" + (g_confine_enabled ? "true" : "false") + ","
+               "\"confine_effective\":" + (confine_effective_enabled() ? "true" : "false") + ","
                "\"color\":\"" + color + "\","
                "\"background\":\"" + background + "\","
                "\"shadow\":\"" + shadow + "\","
@@ -291,6 +306,7 @@ static std::string status_command(eHyprCtlOutputFormat format, std::string reque
            "visible: " + (g_crosshair_visible ? "yes" : "no") + "\n"
            "minimal_mode: " + (g_minimal_mode ? "yes" : "no") + "\n"
            "confine_enabled: " + (g_confine_enabled ? "yes" : "no") + "\n"
+           "confine_effective: " + (confine_effective_enabled() ? "yes" : "no") + "\n"
            "color: " + color + "\n"
            "background: " + background + "\n"
            "shadow: " + shadow + "\n"

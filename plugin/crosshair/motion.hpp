@@ -117,6 +117,10 @@ static void toggle_confine_enabled() {
     set_confine_enabled(!g_confine_enabled);
 }
 
+static bool confine_effective_enabled() {
+    return g_confine_enabled && g_super_held_count <= 0;
+}
+
 static void register_ctrl_tap() {
     const double now = steady_seconds();
     if (now - g_ctrl_tap_started > CTRL_TRIPLE_TAP_WINDOW) {
@@ -170,9 +174,26 @@ static CBox confine_window_box(PHLWINDOW window) {
     return window->getWindowMainSurfaceBox();
 }
 
-static Vector2D clamped_to_window(const Vector2D& position, PHLWINDOW window) {
+static CBox confine_target_box(const Vector2D& position) {
+    const PHLWINDOW window = active_window();
+    const CBox window_box = confine_window_box(window);
+    if (window && window_box.w > 2.0 && window_box.h > 2.0)
+        return window_box;
+
+    if (!g_pCompositor)
+        return CBox{0, 0, 0, 0};
+
+    PHLMONITOR monitor = g_pCompositor->getMonitorFromVector(position);
+    if (!monitor)
+        monitor = g_pCompositor->getMonitorFromCursor();
+    if (!monitor)
+        return CBox{0, 0, 0, 0};
+
+    return CBox{monitor->m_position.x, monitor->m_position.y, monitor->m_size.x, monitor->m_size.y};
+}
+
+static Vector2D clamped_to_box(const Vector2D& position, const CBox& box) {
     constexpr double INSET = 1.0;
-    const CBox box = confine_window_box(window);
     const double min_x = box.x + INSET;
     const double min_y = box.y + INSET;
     const double max_x = box.x + std::max(INSET, box.w - INSET);
@@ -185,15 +206,14 @@ static Vector2D clamped_to_window(const Vector2D& position, PHLWINDOW window) {
 }
 
 static Vector2D confine_pointer_position(const Vector2D& position) {
-    if (!g_confine_enabled || g_confine_warping || !g_pPointerManager)
+    if (!confine_effective_enabled() || g_confine_warping || !g_pPointerManager)
         return position;
 
-    const PHLWINDOW window = active_window();
-    const CBox box = confine_window_box(window);
-    if (!window || box.w <= 2.0 || box.h <= 2.0)
+    const CBox box = confine_target_box(position);
+    if (box.w <= 2.0 || box.h <= 2.0)
         return position;
 
-    const Vector2D clamped = clamped_to_window(position, window);
+    const Vector2D clamped = clamped_to_box(position, box);
     if (clamped == position)
         return position;
 
